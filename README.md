@@ -7,10 +7,19 @@ ratings** through the Kindle's existing Amazon/Goodreads session.
 No Goodreads API key, Goodreads password, Amazon cookie, or manually supplied
 account token is required or stored.
 
+> [!NOTE]
+> This is a fork of
+> [soloipd/koreader-goodreads-native](https://github.com/soloipd/koreader-goodreads-native)
+> that adds percentage sync on Kindle firmware without Java 21, such as
+> **5.18.2**. On that firmware the percentage goes through the Kindle's own
+> library service instead of a Java agent; see
+> [Percentage on cvm firmware](#percentage-on-cvm-firmware). Firmware 5.19.x
+> behaves exactly as upstream.
+
 > [!WARNING]
-> This plugin dynamically attaches a Java agent to Amazon's Kindle framework.
-> It is firmware-specific, intended only for devices you own, and should be
-> installed only from source or releases you trust.
+> On Java 21 firmware this plugin dynamically attaches a Java agent to
+> Amazon's Kindle framework. It is firmware-specific, intended only for devices
+> you own, and should be installed only from source or releases you trust.
 
 ## Features
 
@@ -23,6 +32,12 @@ account token is required or stored.
   with streak, pace, projected-finish, annual-goal, and export views.
 - Silently sends the live rounded whole-number percentage shortly after open,
   periodically while reading, on suspend/resume, and on close.
+- Works on firmware that ships only Amazon's older `cvm` runtime (for example
+  5.18.2): percentage goes through the Kindle's native library service with a
+  short, user-chosen note that Goodreads requires, and is recorded only after
+  the Kindle confirms Goodreads accepted it.
+- Detects the Kindle's Java runtime once and fails fast with a clear reason,
+  instead of timing out, when a sync path cannot work on the current firmware.
 - Runs KFX annotation-position translation in a detached worker, so page turns,
   suspend, book close, and the Bookshelf do not wait for the ARM extractor.
 - Optionally imports native Kindle highlights and notes into the matching
@@ -80,7 +95,9 @@ Compatibility reports are welcome.
 
 ## Installation
 
-1. Download `goodreads-native-koreader-vX.Y.Z.zip` from Releases.
+1. Download `goodreads-native-koreader-vX.Y.Z.zip` from Releases. Until this
+   fork publishes a release, use the `goodreads-native-koreader` artifact from
+   a successful run on its **Actions** tab.
 2. Extract it into KOReader's plugin directory so this exact path exists:
 
    ```text
@@ -92,6 +109,9 @@ Compatibility reports are welcome.
 5. Leave **Automatic shelf sync**, **Silent percentage sync**,
    **Sync periodically while reading**, **Sync notes and highlights**, and
    **Prompt to rate completed books** enabled.
+6. On firmware without Java 21 (for example 5.18.2), optionally choose the
+   public note sent with each progress update under **Progress update note**.
+   It defaults to `Reading`.
 
 Existing cached EPUBs created before position-map support continue to work for
 reading and progress, but annotation sync skips them safely. Regenerate each
@@ -103,6 +123,14 @@ For an SSH installation from the repository checkout:
 ```sh
 scp -P PORT -r goodreads.koplugin \
   root@KINDLE_IP:/mnt/us/koreader/plugins/
+```
+
+The helpers in `bin/` are shell scripts and must keep Unix (LF) line endings.
+On Windows, a checkout with `core.autocrlf=true` has CRLF copies that fail on
+the Kindle. Install the release or CI zip, or export a clean copy with:
+
+```sh
+git -c core.autocrlf=false archive HEAD goodreads.koplugin | tar -x -C <folder>
 ```
 
 Restart KOReader after an install or upgrade. A full Kindle reboot is normally
@@ -132,11 +160,18 @@ would otherwise be ambiguous.
 2. A checkpoint runs shortly after open, at the configured interval, on
    suspend/resume, on close, or when **Sync current book now** is selected.
 3. The plugin invokes the native KAF shelf action when applicable.
-4. A helper attaches the release agent to the running Kindle framework.
-5. The agent sends the same native `PostShareProgressRequest` used by Amazon's
-   reader-sharing implementation.
-6. HTTP 200 or 202 without a native error envelope counts as success.
-7. The accepted integer percentage is saved under:
+4. The `sync-progress` helper picks a transport from the Kindle's runtime:
+   - **Java 21** (5.19.x): it attaches the release agent to the running Kindle
+     framework, and the agent sends the same native `PostShareProgressRequest`
+     used by Amazon's reader-sharing implementation.
+   - **`cvm` only** (5.18.x): it asks the framework's library service
+     (`com.lab126.readnow` / `kppGoodReads`) to send that request with your
+     progress update note.
+   - **No runtime**: percentage sync is skipped with a one-time notice.
+5. With the agent, HTTP 200 or 202 without a native error envelope counts as
+   success. With the library service, only a returned `result = "true"`
+   (HTTP 202) does.
+6. The accepted integer percentage is saved under:
 
    ```text
    /mnt/us/koreader/settings/goodreads_native_progress/<ASIN>
@@ -250,6 +285,8 @@ private personal export and remove them when no longer needed.
 Enable **Redacted debug log**, then select **Show sync diagnostics**. The view
 compares:
 
+- the detected percentage runtime (Java 21 agent, `cvm` library service, or
+  missing) and, on `cvm` firmware, the current progress update note;
 - the currently open book's live percentage;
 - the last percentage accepted and persisted for that ASIN; and
 - the latest native result, including success, HTTP status, or failure stage.
@@ -619,6 +656,9 @@ framework logs in public issues.
 ## Limitations
 
 - Goodreads receives integer percentages, matching Amazon's native request.
+- On `cvm`-only firmware such as 5.18.2, every progress update carries a
+  public note, because Goodreads rejects that request without one. Annotation
+  sync still requires Java 21 and is unavailable there.
 - Goodreads ratings are whole stars from 1–5; half-star ratings are not
   supported by the native service.
 - KOReader's free-form book review remains local; only explicit whole-star
