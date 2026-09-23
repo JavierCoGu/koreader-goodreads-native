@@ -79,8 +79,7 @@ if [ ! -f "$payload" ] || [ ! -r "$AGENT_JAR" ] \
     exit 3
 fi
 
-# Set by goodreads_detect_java_runtime; the defaults fail closed.
-java_runtime=missing
+# Set by goodreads_detect_java_runtime; the default fails closed.
 attach_supported=false
 # shellcheck source=goodreads-java-runtime
 . "$SCRIPT_DIR/goodreads-java-runtime"
