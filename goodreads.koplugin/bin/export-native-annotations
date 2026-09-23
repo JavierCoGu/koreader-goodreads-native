@@ -24,6 +24,9 @@ case "$payload" in
     /tmp/goodreads-native-export-[0-9]*.properties) ;;
     *) exit 2 ;;
 esac
+# Set by goodreads_detect_java_runtime; the defaults fail closed.
+java_runtime=missing
+attach_supported=false
 # shellcheck source=goodreads-java-runtime
 . "$SCRIPT_DIR/goodreads-java-runtime"
 goodreads_detect_java_runtime

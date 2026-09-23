@@ -87,6 +87,9 @@ else
     single_instance=ok
 fi
 
+# Set by goodreads_detect_java_runtime; the defaults fail closed.
+java_runtime=missing
+attach_supported=false
 # shellcheck source=goodreads-java-runtime
 . "$SCRIPT_DIR/goodreads-java-runtime"
 goodreads_detect_java_runtime

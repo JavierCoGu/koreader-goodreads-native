@@ -9,6 +9,8 @@
 # Sets JAVA_BIN, CVM_BIN, java_runtime (available|cvm|missing), and
 # attach_supported (true|false).
 
+# The assignments are this library's output, read by the sourcing script.
+# shellcheck disable=SC2034
 goodreads_detect_java_runtime() {
     JAVA_BIN="${GOODREADS_JAVA_BIN:-/usr/java/bin/java}"
     CVM_BIN="${GOODREADS_CVM_BIN:-/usr/java/bin/cvm}"
