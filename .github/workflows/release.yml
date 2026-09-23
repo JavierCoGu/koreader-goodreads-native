@@ -25,7 +25,26 @@ jobs:
       - name: Build, check, and package
         run: make build check stress package
 
+      - name: Write release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          zip_name="goodreads-native-koreader-$GITHUB_REF_NAME.zip"
+          {
+            printf '## Install\n\n'
+            printf '1. Download `%s` below and extract it. It contains one folder, `goodreads.koplugin`.\n' "$zip_name"
+            printf '2. Connect the Kindle by USB and copy that folder into `koreader/plugins/`, so `koreader/plugins/goodreads.koplugin/main.lua` exists.\n'
+            printf '3. Eject the Kindle and restart KOReader.\n'
+            printf '4. Open **Tools → More tools → Goodreads (native Kindle sync)**.\n\n'
+            printf 'On firmware without Java 21 (for example 5.18.2), each progress update carries a short public note that Goodreads requires; choose it under **Progress update note**. Verify the download with the `.sha256` file.\n\n'
+            printf '## Changes\n\n'
+            awk -v v="$version" 'index($0, "## [" v "]") == 1 {on=1; next} on && /^## \[/ {exit} on' CHANGELOG.md
+          } >release-notes.md
+          grep -q '^### ' release-notes.md \
+            || { printf 'error: CHANGELOG.md has no section for %s\n' "$version" >&2; exit 1; }
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag
