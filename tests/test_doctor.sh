@@ -59,6 +59,7 @@ grep -Fqx 'reader_launch_attempted=false' "$output"
 grep -Fqx 'schema=2' "$output"
 grep -Fqx 'java_runtime=available' "$output"
 grep -Fqx 'attach_supported=true' "$output"
+grep -Fqx 'progress_transport=attach' "$output"
 grep -Fqx 'overall=healthy' "$output"
 if grep -Eq 'B0[0-9]+|private|secret|token' "$output"; then
     printf 'error: doctor leaked private fixture data\n' >&2
@@ -77,6 +78,7 @@ set -e
 [ "$status" -eq 1 ]
 grep -Fqx 'java_runtime=cvm' "$output"
 grep -Fqx 'attach_supported=false' "$output"
+grep -Fqx 'progress_transport=lipc' "$output"
 grep -Fqx 'warnings=1' "$output"
 grep -Fqx 'overall=warning' "$output"
 
@@ -90,6 +92,7 @@ set -e
 [ "$status" -eq 1 ]
 grep -Fqx 'java_runtime=missing' "$output"
 grep -Fqx 'attach_supported=false' "$output"
+grep -Fqx 'progress_transport=none' "$output"
 grep -Fqx 'overall=warning' "$output"
 
 # A second independent reader root is a hard error with a machine-readable

@@ -3,6 +3,40 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-09-23
+
+### Added
+
+- Percentage sync on firmware that ships only Amazon's `cvm` runtime (for
+  example 5.18.2). Without `jdk.attach`, `sync-progress` now posts through the
+  Kindle framework's own library service (`com.lab126.readnow` /
+  `kppGoodReads`), which builds the same native Goodreads progress request.
+  The percentage is recorded only when the service returns `result = "true"`
+  (HTTP 202), and the call is bounded to 30 seconds.
+- **Progress update note** menu. Goodreads accepts this request only with a
+  non-empty note, shown publicly with each update. It defaults to `Reading`
+  and offers presets or custom text limited to letters, digits, spaces, and
+  `. , ! -`. A one-time notice explains the note on first use.
+- `goodreads-doctor` reports `progress_transport=attach|lipc|none`.
+
+### Changed
+
+- Only a missing Kindle runtime now pauses percentage sync. The
+  `runtime_unsupported` stage remains for annotation sync on `cvm` firmware.
+- Diagnostics show the progress transport and, on `cvm` firmware, the note.
+
+### Fixed
+
+- `tests/test_main.lua` exceeded Lua 5.1's 200-local limit after the 0.11.4
+  runtime tests; those tests are now scoped.
+
+### Tests
+
+- Fake-LIPC coverage for the exact request payload, confirmed readback,
+  duplicate suppression, native rejection, the watchdog, blank or unsafe
+  notes, and a missing tool; Lua coverage for note validation, trimming,
+  transport selection, the one-time notice, and the note menu.
+
 ## [0.11.4] - 2026-09-23
 
 ### Fixed

@@ -1,6 +1,10 @@
 #!/bin/sh
 
-# Send one silent percentage update through the running Kindle Java framework.
+# Send one silent percentage update through the running Kindle framework.
+# Java 21 firmware (5.19.x) attaches a small agent that calls GrokService.
+# cvm-only firmware (5.18.x) cannot attach, so the helper asks the framework's
+# own library service (com.lab126.readnow / kppGoodReads) to post the update.
+# That service requires a non-empty note, which Goodreads shows publicly.
 # The framework supplies its own Amazon/Goodreads session; this helper accepts
 # no account credentials and persists only the last successfully sent percent.
 
@@ -11,16 +15,21 @@ PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}
 AGENT_JAR="$PLUGIN_DIR/bin/goodreads-progress-agent-v2.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="${GOODREADS_PROGRESS_STATE_DIR:-/mnt/us/koreader/settings/goodreads_native_progress}"
-LOCK_DIR="/tmp/goodreads-progress-sync.lock"
+LOCK_DIR="${GOODREADS_PROGRESS_LOCK_DIR:-/tmp/goodreads-progress-sync.lock}"
 RESULT_FILE="${GOODREADS_PROGRESS_RESULT_FILE:-/tmp/goodreads-progress-result.log}"
 ATTACH_LOG="/tmp/goodreads-progress-attach.log"
+LIPC_HASH_TOOL="${GOODREADS_LIPC_HASH_TOOL:-/usr/bin/lipc-hash-prop}"
+READNOW_PUBLISHER="com.lab126.readnow"
+READNOW_PROPERTY="kppGoodReads"
+LIPC_TIMEOUT_SECONDS="${GOODREADS_PROGRESS_LIPC_TIMEOUT:-30}"
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
     exit 2
 fi
 
 asin="$1"
 percent="$2"
+note="${3-}"
 
 if ! printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$'; then
     exit 2
@@ -34,31 +43,62 @@ if [ "$percent" -lt 1 ] || [ "$percent" -gt 100 ]; then
     exit 2
 fi
 
-# shellcheck source=goodreads-java-runtime
-. "$SCRIPT_DIR/goodreads-java-runtime"
-goodreads_detect_java_runtime
+# The note travels inside a LIPC hash literal, so allow only plain text.
+case "$note" in
+    *[!A-Za-z0-9\ .,!-]*) exit 2 ;;
+esac
+if [ "${#note}" -gt 80 ]; then
+    exit 2
+fi
 
-# Without jdk.attach no agent can run, so no result file would ever appear and
-# KOReader would wait out its full poll window. Publish a definite failure
-# instead. The file matches the agent's own format and lives only in /tmp.
-if [ "$attach_supported" != true ]; then
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Atomically replace the /tmp result that KOReader polls. Arguments are extra
+# key=value lines after the fixed request identity.
+publish_result() {
     result_temp="$RESULT_FILE.$$"
     if {
-        printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'started_at=%s\n' "$started_at"
         printf 'asin=%s\n' "$asin"
         printf 'percent=%s\n' "$percent"
-        printf 'success=false\n'
-        printf 'failed_stage=%s\n' "$(goodreads_runtime_failed_stage)"
+        for line in "$@"; do
+            printf '%s\n' "$line"
+        done
     } >"$result_temp"; then
         mv -f "$result_temp" "$RESULT_FILE" || rm -f "$result_temp"
     else
         rm -f "$result_temp"
     fi
-    exit 3
-fi
+}
 
-if [ ! -r "$AGENT_JAR" ] \
-    || [ ! -r "$LAUNCHER_CLASSES/AttachLauncher.class" ]; then
+# shellcheck source=goodreads-java-runtime
+. "$SCRIPT_DIR/goodreads-java-runtime"
+goodreads_detect_java_runtime
+
+if [ "$attach_supported" = true ]; then
+    transport=attach
+    if [ ! -r "$AGENT_JAR" ] \
+        || [ ! -r "$LAUNCHER_CLASSES/AttachLauncher.class" ]; then
+        exit 3
+    fi
+elif [ "$java_runtime" = cvm ]; then
+    transport=lipc
+    # Goodreads answers HTTP 400 for an empty or blank note on this service.
+    case "$note" in
+        *[!\ ]*) ;;
+        *)
+            publish_result 'transport=lipc' 'success=false' 'failed_stage=note_required'
+            exit 3
+            ;;
+    esac
+    if [ ! -x "$LIPC_HASH_TOOL" ]; then
+        publish_result 'transport=lipc' 'success=false' 'failed_stage=lipc_unavailable'
+        exit 3
+    fi
+else
+    # Without any Kindle runtime no result would ever appear and KOReader
+    # would wait out its full poll window. Publish a definite failure instead.
+    publish_result 'success=false' "failed_stage=$(goodreads_runtime_failed_stage)"
     exit 3
 fi
 
@@ -75,7 +115,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     exit 75
 fi
 
+native_output=""
 cleanup_lock() {
+    if [ -n "$native_output" ]; then
+        rm -f "$native_output"
+    fi
     rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 trap cleanup_lock EXIT HUP INT TERM
@@ -85,33 +129,73 @@ if [ -r "$state_file" ] && [ "$(sed -n '1p' "$state_file")" = "$percent" ]; then
     exit 0
 fi
 
-framework_pid="$(
-    ps -eo pid,args 2>/dev/null \
-        | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }'
-)"
-
-case "$framework_pid" in
-    ''|*[!0-9]*) exit 5 ;;
-esac
-
 request_id="$$"
-agent_arguments="$asin,$percent,reader.eink"
 
-# A missing result after attachment must never be mistaken for an earlier
-# success. The file lives only in /tmp and is recreated by the agent.
-rm -f "$RESULT_FILE"
+if [ "$transport" = attach ]; then
+    framework_pid="$(
+        ps -eo pid,args 2>/dev/null \
+            | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }'
+    )"
 
-if ! "$JAVA_BIN" --add-modules jdk.attach \
-    -cp "$LAUNCHER_CLASSES" \
-    AttachLauncher "$framework_pid" "$AGENT_JAR" "$agent_arguments" \
-    >"$ATTACH_LOG" 2>&1; then
-    exit 6
-fi
+    case "$framework_pid" in
+        ''|*[!0-9]*) exit 5 ;;
+    esac
 
-if ! grep -Fqx "asin=$asin" "$RESULT_FILE" \
-    || ! grep -Fqx "percent=$percent" "$RESULT_FILE" \
-    || ! grep -Fqx 'success=true' "$RESULT_FILE"; then
-    exit 7
+    agent_arguments="$asin,$percent,reader.eink"
+
+    # A missing result after attachment must never be mistaken for an earlier
+    # success. The file lives only in /tmp and is recreated by the agent.
+    rm -f "$RESULT_FILE"
+
+    if ! "$JAVA_BIN" --add-modules jdk.attach \
+        -cp "$LAUNCHER_CLASSES" \
+        AttachLauncher "$framework_pid" "$AGENT_JAR" "$agent_arguments" \
+        >"$ATTACH_LOG" 2>&1; then
+        exit 6
+    fi
+
+    if ! grep -Fqx "asin=$asin" "$RESULT_FILE" \
+        || ! grep -Fqx "percent=$percent" "$RESULT_FILE" \
+        || ! grep -Fqx 'success=true' "$RESULT_FILE"; then
+        exit 7
+    fi
+else
+    # GoodReadsHandler builds the same PostShareProgressRequest as the agent,
+    # sends it with the framework's GrokService, and writes result="true" into
+    # the returned hash only for HTTP 202. The call is bounded so a stalled
+    # native service cannot hold the lock.
+    native_output="/tmp/goodreads-progress-native.$request_id"
+    payload="{kppMycdActivityName = \"PostReview\", asin = \"$asin\", progress = \"$percent\", note = \"$note\"}"
+
+    printf '%s\n' "$payload" \
+        | "$LIPC_HASH_TOOL" "$READNOW_PUBLISHER" "$READNOW_PROPERTY" \
+            >"$native_output" 2>&1 &
+    native_pid=$!
+    (
+        sleep "$LIPC_TIMEOUT_SECONDS"
+        kill "$native_pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+
+    wait "$native_pid"
+    native_status=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+
+    # The handler echoes the request fields; require this exact request back.
+    if [ "$native_status" -eq 0 ] \
+        && grep -Eq '^[[:space:]]*result = "true"' "$native_output" \
+        && grep -Fq "asin = \"$asin\"" "$native_output" \
+        && grep -Fq "progress = \"$percent\"" "$native_output"; then
+        publish_result 'transport=lipc' "native_exit=$native_status" \
+            'http_status=202' 'success=true' \
+            "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    else
+        publish_result 'transport=lipc' "native_exit=$native_status" \
+            'success=false' 'failed_stage=send_request' \
+            "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        exit 7
+    fi
 fi
 
 state_temp="$state_file.$request_id"

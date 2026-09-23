@@ -55,10 +55,13 @@ account token is required or stored.
 ## Requirements
 
 - A jailbroken Kindle with KOReader.
-- For percentage and annotation sync: Kindle firmware whose Amazon framework
-  includes Java 21 and `jdk.attach` (`/usr/java/bin/java`). Firmware that ships
-  only Amazon's older `cvm` runtime, such as 5.18.2, supports shelf and rating
-  sync only; see [Troubleshooting](#troubleshooting).
+- For annotation sync: Kindle firmware whose Amazon framework includes Java 21
+  and `jdk.attach` (`/usr/java/bin/java`).
+- For percentage sync: either that Java 21 firmware, or firmware that ships
+  only Amazon's older `cvm` runtime, such as 5.18.2. On `cvm` firmware the
+  percentage is sent through the Kindle's own library service, which Goodreads
+  accepts only with a short note; see
+  [Percentage on cvm firmware](#percentage-on-cvm-firmware).
 - The Amazon account on the Kindle already linked to Goodreads.
 - `kindle.koplugin`; notes/highlights require its position-map-enabled build,
   and native-to-KOReader import requires v0.0.7 or newer.
@@ -68,8 +71,8 @@ account token is required or stored.
 Verified on:
 
 - Kindle firmware **5.19.5**: shelf, percentage, rating, and annotations
-- Kindle firmware **5.18.2** (`cvm` only): shelf and rating; percentage and
-  annotations are reported as `runtime_unsupported`
+- Kindle firmware **5.18.2** (`cvm` only): shelf, rating, and percentage (with
+  a public note); annotations are reported as `runtime_unsupported`
 - KOReader **v2026.07.1**
 
 Other firmware versions may use different obfuscated class or method names.
@@ -534,19 +537,40 @@ error_envelope=false
 success=true
 ```
 
-The doctor's `java_runtime` is `available` (Java 21), `cvm`, or `missing`, and
-`attach_supported` says whether percentage and annotation agents can run. On
-firmware such as 5.18.2, `/usr/java/bin` contains only `cvm` and `keytool`.
-`cvm` is Amazon's older embedded JVM without `jdk.attach`, so the plugin skips
-percentage sync, shows a one-time notice, and keeps shelf and rating sync
-working. The helpers read `GOODREADS_JAVA_BIN` and `GOODREADS_CVM_BIN` for
-testing alternative runtime paths.
+The doctor's `java_runtime` is `available` (Java 21), `cvm`, or `missing`;
+`attach_supported` says whether the annotation agents can run; and
+`progress_transport` is `attach`, `lipc`, or `none`. The helpers read
+`GOODREADS_JAVA_BIN`, `GOODREADS_CVM_BIN`, and `GOODREADS_LIPC_HASH_TOOL` for
+testing alternative paths.
+
+### Percentage on cvm firmware
+
+On firmware such as 5.18.2, `/usr/java/bin` contains only `cvm` and `keytool`.
+`cvm` is Amazon's older embedded JVM without `jdk.attach`, so the percentage
+agent cannot be loaded. Instead, `sync-progress` asks the Kindle's own library
+service (`com.lab126.readnow` / `kppGoodReads`) to post the update. That
+service builds the same native `PostShareProgressRequest` and sends it with the
+Kindle's Goodreads session.
+
+Goodreads rejects this request with HTTP 400 when its note is empty or blank,
+so every update carries a short note, shown publicly with the progress update.
+It defaults to `Reading`; choose another under **Progress update note**. Notes
+may contain only letters, digits, spaces, and `. , ! -`, up to 80 characters.
+The plugin shows a one-time notice the first time it posts with a note. The
+percentage is recorded as accepted only when the native reply contains
+`result = "true"`, which the service sets only for HTTP 202.
 
 Common failure points:
 
-- `failed_stage=runtime_unsupported`: only `cvm` is present; percentage and
-  annotation sync need Java 21 with `jdk.attach`.
-- `failed_stage=runtime_missing`: no Java runtime was found at all.
+- `failed_stage=note_required`: `cvm` firmware with an empty, blank, or invalid
+  note; choose a note in the menu.
+- `failed_stage=lipc_unavailable`: `lipc-hash-prop` is missing.
+- `failed_stage=send_request` with `transport=lipc`: the library service
+  answered `result = "false"` (Goodreads did not return HTTP 202) or timed
+  out after 30 seconds.
+- `failed_stage=runtime_unsupported`: annotation sync on `cvm` firmware, which
+  still needs Java 21 with `jdk.attach`.
+- `failed_stage=runtime_missing`: no Kindle Java runtime was found at all.
 - `failed_stage=parse_arguments`: invalid ASIN, percentage, or application.
 - `failed_stage=resolve_native_services`: Amazon's Grok or reader-sharing
   service is unavailable, often because the native framework was stopped.

@@ -65,10 +65,16 @@ local PROGRESS_RESULT_FILE = "/tmp/goodreads-progress-result.log"
 local ANNOTATION_RESULT_FILE = "/tmp/goodreads-annotation-result.log"
 local PROGRESS_STATE_DIR = "/mnt/us/koreader/settings/goodreads_native_progress"
 -- Percentage and annotation agents need Java 21 with jdk.attach. Firmware such
--- as 5.18.2 ships only Amazon's cvm, which cannot attach to the framework.
+-- as 5.18.2 ships only Amazon's cvm, which cannot attach to the framework; its
+-- percentage updates go through the native library service instead, which
+-- Goodreads accepts only with a non-empty, publicly visible note.
 local JAVA_BIN = os.getenv("GOODREADS_JAVA_BIN") or "/usr/java/bin/java"
 local CVM_BIN = os.getenv("GOODREADS_CVM_BIN") or "/usr/java/bin/cvm"
 local PROGRESS_RUNTIME_UNAVAILABLE = "percentage sync unavailable on this firmware"
+local PROGRESS_NOTE_REQUIRED = "percentage note required on this firmware"
+local DEFAULT_PROGRESS_NOTE = "Reading"
+local PROGRESS_NOTE_PRESETS = { "Reading", "Reading on Kindle", "Progress update" }
+local PROGRESS_NOTE_MAX_LENGTH = 80
 local DEBUG_LOG_FILE = "/mnt/us/koreader/settings/goodreads_native_debug.log"
 local DEBUG_LOG_MAX_BYTES = 128 * 1024
 local DEFAULT_PROGRESS_INTERVAL_SECONDS = 300
@@ -89,6 +95,8 @@ local PROGRESS_RESULT_KEYS = {
     success = true,
     failed_stage = true,
     error_class = true,
+    transport = true,
+    native_exit = true,
 }
 local ANNOTATION_RESULT_KEYS = {
     asin = true,
@@ -179,6 +187,7 @@ local DEBUG_FIELD_ORDER = {
     "cloud_snapshot_synced",
     "failed_stage",
     "error_class",
+    "transport",
     "changed",
     "annotations",
     "highlights",
@@ -3360,9 +3369,29 @@ local function makeCommand(asin, action)
     )
 end
 
-local function makeProgressCommand(asin, percent)
-    -- Both values have already passed strict allowlists.
-    return string.format("%s %s %d", PROGRESS_HELPER, asin, percent)
+--- Return a note the native library service accepts, or nil. The allowlist
+--- keeps the value safe inside both a shell argument and a LIPC hash literal.
+local function sanitizeProgressNote(value)
+    if type(value) ~= "string" then
+        return nil
+    end
+    value = value:match("^%s*(.-)%s*$")
+    if value == "" or #value > PROGRESS_NOTE_MAX_LENGTH
+        or value:find("[^%w %.,!%-]")
+    then
+        return nil
+    end
+    return value
+end
+
+local function makeProgressCommand(asin, percent, note)
+    -- All values have already passed strict allowlists; the note cannot
+    -- contain quotes, so single quotes keep its spaces in one argument.
+    local command = string.format("%s %s %d", PROGRESS_HELPER, asin, percent)
+    if note then
+        command = command .. " '" .. note .. "'"
+    end
+    return command
 end
 
 local function makeRatingCommand(asin, rating, request_id)
@@ -3376,6 +3405,9 @@ function Goodreads:init()
     end
     if self.settings.dedupe_seconds == nil then
         self.settings.dedupe_seconds = 300
+    end
+    if not sanitizeProgressNote(self.settings.progress_note) then
+        self.settings.progress_note = DEFAULT_PROGRESS_NOTE
     end
     if self.settings.percentage_enabled == nil then
         self.settings.percentage_enabled = true
@@ -3557,6 +3589,7 @@ function Goodreads:pollProgressResult(asin, percent, previous_started_at, trigge
                 success = fields.success or "false",
                 failed_stage = fields.failed_stage,
                 error_class = fields.error_class,
+                transport = fields.transport,
             })
             return
         end
@@ -4604,8 +4637,8 @@ function Goodreads:progressRuntime()
         else
             self.progress_runtime = "missing"
         end
-        -- A later firmware may add Java 21; explain again if it is lost.
-        if self.progress_runtime == "available"
+        -- A later firmware may add a runtime; explain again if it is lost.
+        if self.progress_runtime ~= "missing"
             and self.settings.progress_runtime_notice_shown
         then
             self.settings.progress_runtime_notice_shown = nil
@@ -4616,14 +4649,13 @@ function Goodreads:progressRuntime()
 end
 
 function Goodreads:noteProgressRuntimeUnavailable(asin, percent, trigger)
-    local runtime = self:progressRuntime()
     if not self.progress_runtime_logged then
         self.progress_runtime_logged = true
         self:debugLog("progress_skipped", {
             trigger = trigger or "unknown",
             asin = asin,
             percent = percent,
-            status = runtime == "cvm" and "runtime_unsupported" or "runtime_missing",
+            status = "runtime_missing",
         })
     end
     if self.settings.progress_runtime_notice_shown then
@@ -4634,8 +4666,27 @@ function Goodreads:noteProgressRuntimeUnavailable(asin, percent, trigger)
     -- Manual sync reports the same fact in its own summary message.
     if trigger ~= "manual" then
         UIManager:show(InfoMessage:new({
-            text = _("Goodreads percentage sync needs Java 21, which this Kindle firmware does not include. Shelf and rating sync still work."),
+            text = _("Goodreads percentage sync needs a Kindle Java runtime, which this firmware does not include. Shelf and rating sync still work."),
             timeout = 8,
+        }))
+    end
+end
+
+--- cvm-only firmware posts each percentage with a public note. Say so once.
+function Goodreads:noteProgressNoteVisible(note, trigger)
+    if self.settings.progress_note_notice_shown then
+        return
+    end
+    self.settings.progress_note_notice_shown = true
+    self:saveSettings()
+    -- Manual sync names the note in its own summary message.
+    if trigger ~= "manual" then
+        UIManager:show(InfoMessage:new({
+            text = string.format(
+                _("On this Kindle firmware Goodreads requires a note with each progress update. Updates are posted with the note \"%s\". Change it under Goodreads (native Kindle sync) → Progress update note."),
+                note
+            ),
+            timeout = 10,
         }))
     end
 end
@@ -4656,11 +4707,26 @@ function Goodreads:syncProgress(asin, fraction, trigger)
         return false, "no percentage progress yet"
     end
 
-    -- Without jdk.attach the helper can never deliver. Skip it entirely so
-    -- periodic, suspend, and close checkpoints do not keep re-queuing it.
-    if self:progressRuntime() ~= "available" then
+    -- Java 21 attaches the agent. cvm-only firmware uses the native library
+    -- service, which needs a note. With neither runtime nothing can deliver,
+    -- so skip the helper and stop periodic/close checkpoints re-queuing it.
+    local runtime = self:progressRuntime()
+    local note
+    if runtime == "missing" then
         self:noteProgressRuntimeUnavailable(asin, percent, trigger)
         return false, PROGRESS_RUNTIME_UNAVAILABLE
+    elseif runtime == "cvm" then
+        note = sanitizeProgressNote(self.settings.progress_note)
+        if not note then
+            self:debugLog("progress_skipped", {
+                trigger = trigger or "unknown",
+                asin = asin,
+                percent = percent,
+                status = "note_required",
+            })
+            return false, PROGRESS_NOTE_REQUIRED
+        end
+        self:noteProgressNoteVisible(note, trigger)
     end
 
     local saved_percent = tonumber(readFirstLine(PROGRESS_STATE_DIR .. "/" .. asin))
@@ -4700,7 +4766,7 @@ function Goodreads:syncProgress(asin, fraction, trigger)
     delay = math.max(0, math.min(30, math.floor(delay)))
     local previous_result = readKeyValueFile(PROGRESS_RESULT_FILE, PROGRESS_RESULT_KEYS)
     local previous_started_at = previous_result and previous_result.started_at
-    local command = makeProgressCommand(asin, percent)
+    local command = makeProgressCommand(asin, percent, note)
     os.execute(string.format(
         "(sleep %d; %s) >/dev/null 2>&1 &",
         delay,
@@ -4854,10 +4920,17 @@ function Goodreads:syncCurrentBook()
     local ok, detail = self:syncAsin(asin, action, percent, true, "manual")
     local progress_ok, progress_detail = self:syncProgress(asin, percent, "manual")
     local message
-    if ok and progress_ok then
+    if ok and progress_ok and self:progressRuntime() == "cvm" then
+        message = string.format(
+            _("Goodreads shelf confirmed; percentage queued with the public note \"%s\"."),
+            sanitizeProgressNote(self.settings.progress_note) or ""
+        )
+    elseif ok and progress_ok then
         message = _("Goodreads shelf confirmed; percentage queued.")
     elseif ok and progress_detail == PROGRESS_RUNTIME_UNAVAILABLE then
-        message = _("Goodreads shelf confirmed; percentage sync is unavailable on this Kindle firmware (needs Java 21).")
+        message = _("Goodreads shelf confirmed; percentage sync is unavailable on this Kindle firmware (no Java runtime).")
+    elseif ok and progress_detail == PROGRESS_NOTE_REQUIRED then
+        message = _("Goodreads shelf confirmed; set a progress update note to sync percentage on this Kindle firmware.")
     else
         message = string.format(_("Goodreads sync failed: %s"), detail or _("unknown error"))
     end
@@ -4909,13 +4982,19 @@ function Goodreads:showDiagnostics()
         string.format(
             _("Percentage runtime: %s"),
             ({
-                available = _("Java 21 (attach supported)"),
-                cvm = _("cvm only (percentage unsupported)"),
-                missing = _("missing"),
+                available = _("Java 21 (attach agent)"),
+                cvm = _("cvm only (native library service)"),
+                missing = _("missing (percentage unsupported)"),
             })[self:progressRuntime()]
         ),
-        "",
     }
+    if self:progressRuntime() == "cvm" then
+        table.insert(lines, string.format(
+            _("Progress update note: %s"),
+            sanitizeProgressNote(self.settings.progress_note) or _("none (percentage paused)")
+        ))
+    end
+    table.insert(lines, "")
 
     if isAsin(current_asin) and current_percent then
         table.insert(lines, string.format(
@@ -5238,6 +5317,90 @@ local function debugLogExists()
     return true
 end
 
+function Goodreads:setProgressNote(note)
+    self.settings.progress_note = note
+    self:saveSettings()
+end
+
+function Goodreads:showProgressNoteDialog()
+    -- Loaded lazily: only this rarely used dialog needs the widget.
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new({
+        title = _("Goodreads progress update note"),
+        description = _("Shown publicly on each Goodreads progress update. Use letters, digits, spaces, and . , ! - only."),
+        input = self.settings.progress_note or "",
+        buttons = {
+            {
+                {
+                    text = _("Cancel"),
+                    id = "close",
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        local note = sanitizeProgressNote(dialog:getInputText())
+                        if not note then
+                            UIManager:show(InfoMessage:new({
+                                text = _("Use 1–80 letters, digits, spaces, or . , ! -"),
+                                timeout = 4,
+                            }))
+                            return
+                        end
+                        UIManager:close(dialog)
+                        self:setProgressNote(note)
+                    end,
+                },
+            },
+        },
+    })
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+local function isPresetProgressNote(note)
+    for _index, preset in ipairs(PROGRESS_NOTE_PRESETS) do
+        if note == preset then
+            return true
+        end
+    end
+    return false
+end
+
+function Goodreads:progressNoteMenuItems()
+    local items = {}
+    for _index, preset in ipairs(PROGRESS_NOTE_PRESETS) do
+        table.insert(items, {
+            text = preset,
+            checked_func = function()
+                return self.settings.progress_note == preset
+            end,
+            callback = function()
+                self:setProgressNote(preset)
+            end,
+        })
+    end
+    table.insert(items, {
+        text_func = function()
+            if isPresetProgressNote(self.settings.progress_note) then
+                return _("Custom…")
+            end
+            return string.format(_("Custom: %s"), self.settings.progress_note or "")
+        end,
+        checked_func = function()
+            return not isPresetProgressNote(self.settings.progress_note)
+        end,
+        callback = function()
+            self:showProgressNoteDialog()
+        end,
+    })
+    return items
+end
+
 function Goodreads:addToMainMenu(menu_items)
     menu_items.goodreads_native = {
         text = _("Goodreads (native Kindle sync)"),
@@ -5262,6 +5425,15 @@ function Goodreads:addToMainMenu(menu_items)
                     self.settings.percentage_enabled = not self.settings.percentage_enabled
                     self:saveSettings()
                 end,
+            },
+            {
+                text = _("Progress update note"),
+                help_text = _("Kindle firmware without Java 21 sends percentage through Amazon's library service, which Goodreads accepts only with a note. The note is shown publicly on each progress update."),
+                enabled_func = function()
+                    return self.settings.percentage_enabled == true
+                        and self:progressRuntime() == "cvm"
+                end,
+                sub_item_table = self:progressNoteMenuItems(),
             },
             {
                 text = _("Sync periodically while reading"),

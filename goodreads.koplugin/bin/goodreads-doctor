@@ -90,9 +90,14 @@ fi
 # shellcheck source=goodreads-java-runtime
 . "$SCRIPT_DIR/goodreads-java-runtime"
 goodreads_detect_java_runtime
-# cvm-only firmware (for example 5.18.2) keeps shelf and rating sync, but
-# percentage and annotation agents need Java 21 with jdk.attach.
+# cvm-only firmware (for example 5.18.2) sends percentage through the native
+# library service, but annotation agents still need Java 21 with jdk.attach.
 [ "$attach_supported" = true ] || warnings=$((warnings + 1))
+case "$java_runtime" in
+    available) progress_transport=attach ;;
+    cvm) progress_transport=lipc ;;
+    *) progress_transport=none ;;
+esac
 
 if [ "$framework_processes" -gt 0 ]; then
     native_framework=running
@@ -131,6 +136,7 @@ printf '%s\n' \
     "architecture=$ARCH" \
     "java_runtime=$java_runtime" \
     "attach_supported=$attach_supported" \
+    "progress_transport=$progress_transport" \
     "native_framework=$native_framework" \
     "reader_processes=$reader_processes" \
     "reader_roots=$reader_roots" \

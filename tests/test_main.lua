@@ -275,52 +275,114 @@ for _, command in ipairs(commands) do
         "1,000 periodic checkpoints must publish zero shelf actions")
 end
 
--- Firmware 5.18.2 ships only cvm, which cannot attach the percentage agent.
--- Checkpoints must never queue the helper there, explain the limitation
--- exactly once, and still publish the native shelf action.
-local cvm_plugin = newPlugin(settings({ enabled = true }))
-cvm_plugin.progress_runtime = "cvm"
-commands = {}
-shown_messages = {}
-cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.46, "reading", "reader_ready", "test")
-cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.47, "reading", "suspend", "test")
-for _ = 1, 100 do
-    cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.48, "reading", "periodic", "stress")
-end
-cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.49, "reading", "close", "test")
-local cvm_shelf_commands = 0
-for _, command in ipairs(commands) do
-    assert(not command:match("sync%-progress"),
-        "cvm firmware must never queue the percentage helper")
-    if command:match("lipc%-hash%-prop") then
-        cvm_shelf_commands = cvm_shelf_commands + 1
-    end
-end
-assert(cvm_shelf_commands >= 1, "cvm firmware must still publish the native shelf action")
-assert(#shown_messages == 1 and shown_messages[1].text:match("Java 21"),
-    "the unsupported-runtime notice must be shown exactly once")
-assert(cvm_plugin.settings.progress_runtime_notice_shown == true,
-    "the unsupported-runtime notice must persist across sessions")
-local cvm_ok, cvm_detail = cvm_plugin:syncProgress("B0FLB24198", 0.5, "manual")
-assert(not cvm_ok and cvm_detail == "percentage sync unavailable on this firmware",
-    "manual percentage sync must report the unsupported runtime")
-assert(#shown_messages == 1, "a persisted notice must not be shown again")
+-- Runtime and note selection. Scoped: the main chunk is near Lua's
+-- 200-local limit.
+do
+    -- Java 21 firmware keeps the attach agent, which takes no note.
+    local attach_plugin = newPlugin(settings({ progress_note = "Reading" }))
+    commands = {}
+    assert(attach_plugin:syncProgress("B0FLB24198", 0.46, "test"))
+    assert(commands[1]:match("sync%-progress B0FLB24198 46%)"),
+        "attach firmware must not append a note")
 
--- A later session with Java 21 re-arms the notice for any future downgrade.
-local upgraded_plugin = newPlugin(settings({ progress_runtime_notice_shown = true }))
-upgraded_plugin.progress_runtime = nil
-local original_open = io.open
-io.open = function(path, mode)
-    if path == "/usr/java/bin/java" then
-        return { close = function() end }
+    -- Firmware 5.18.2 ships only cvm, which cannot attach the percentage agent.
+    -- Percentage then goes through the native library service with the public
+    -- note, explained exactly once, while shelf actions are unaffected.
+    local cvm_plugin = newPlugin(settings({ enabled = true, progress_note = "Reading on Kindle" }))
+    cvm_plugin.progress_runtime = "cvm"
+    commands = {}
+    shown_messages = {}
+    cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.46, "reading", "reader_ready", "test")
+    cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.47, "reading", "suspend", "test")
+    for _ = 1, 100 do
+        cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.48, "reading", "periodic", "stress")
     end
-    return original_open(path, mode)
+    cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.49, "reading", "close", "test")
+    local cvm_shelf_commands = 0
+    local cvm_progress_commands = 0
+    for _, command in ipairs(commands) do
+        if command:match("sync%-progress") then
+            assert(command:match("sync%-progress B0FLB24198 4[6-9] 'Reading on Kindle'%)"),
+                "cvm percentage must pass the quoted note to the helper")
+            cvm_progress_commands = cvm_progress_commands + 1
+        elseif command:match("lipc%-hash%-prop") then
+            cvm_shelf_commands = cvm_shelf_commands + 1
+        end
+    end
+    assert(cvm_progress_commands == 4,
+        "each changed percentage must be queued once on cvm firmware")
+    assert(cvm_shelf_commands >= 1, "cvm firmware must still publish the native shelf action")
+    assert(#shown_messages == 1 and shown_messages[1].text:match('"Reading on Kindle"'),
+        "the public-note notice must be shown exactly once")
+    assert(cvm_plugin.settings.progress_note_notice_shown == true,
+        "the public-note notice must persist across sessions")
+    assert(cvm_plugin:syncProgress("B0FLB24198", 0.5, "manual"))
+    assert(#shown_messages == 1, "a persisted notice must not be shown again")
+
+    -- A blank or unsafe note pauses percentage rather than being sent; the
+    -- helper would otherwise receive HTTP 400 or a broken LIPC hash literal.
+    for _, bad_note in ipairs({ "", "   ", "it's", 'say "hi"', "a;b", "a$b",
+        string.rep("x", 81) })
+    do
+        local bad_plugin = newPlugin(settings({ progress_note = bad_note }))
+        bad_plugin.progress_runtime = "cvm"
+        commands = {}
+        local bad_ok, bad_detail = bad_plugin:syncProgress("B0FLB24198", 0.46, "test")
+        assert(not bad_ok and bad_detail == "percentage note required on this firmware",
+            "an invalid note must pause percentage sync")
+        assert(#commands == 0, "an invalid note must never reach the helper")
+    end
+    local trimmed_plugin = newPlugin(settings({ progress_note = "  Reading  " }))
+    trimmed_plugin.progress_runtime = "cvm"
+    commands = {}
+    assert(trimmed_plugin:syncProgress("B0FLB24198", 0.46, "test"))
+    assert(commands[1]:match(" 'Reading'%)"), "surrounding spaces must be trimmed")
+
+    -- With no Kindle runtime at all no transport is known to work. Checkpoints
+    -- must never queue the helper, explain once, and still publish shelves.
+    local missing_plugin = newPlugin(settings({ enabled = true, progress_note = "Reading" }))
+    missing_plugin.progress_runtime = "missing"
+    commands = {}
+    shown_messages = {}
+    missing_plugin:syncCapturedCheckpoint("B0FLB24198", 0.46, "reading", "reader_ready", "test")
+    for _ = 1, 100 do
+        missing_plugin:syncCapturedCheckpoint("B0FLB24198", 0.48, "reading", "periodic", "stress")
+    end
+    missing_plugin:syncCapturedCheckpoint("B0FLB24198", 0.49, "reading", "close", "test")
+    local missing_shelf_commands = 0
+    for _, command in ipairs(commands) do
+        assert(not command:match("sync%-progress"),
+            "a missing runtime must never queue the percentage helper")
+        if command:match("lipc%-hash%-prop") then
+            missing_shelf_commands = missing_shelf_commands + 1
+        end
+    end
+    assert(missing_shelf_commands >= 1, "a missing runtime must still publish shelf actions")
+    assert(#shown_messages == 1 and shown_messages[1].text:match("Java runtime"),
+        "the unsupported-runtime notice must be shown exactly once")
+    assert(missing_plugin.settings.progress_runtime_notice_shown == true,
+        "the unsupported-runtime notice must persist across sessions")
+    local missing_ok, missing_detail = missing_plugin:syncProgress("B0FLB24198", 0.5, "manual")
+    assert(not missing_ok and missing_detail == "percentage sync unavailable on this firmware",
+        "manual percentage sync must report the unsupported runtime")
+    assert(#shown_messages == 1, "a persisted notice must not be shown again")
+
+    -- A later session with Java 21 re-arms the notice for any future downgrade.
+    local upgraded_plugin = newPlugin(settings({ progress_runtime_notice_shown = true }))
+    upgraded_plugin.progress_runtime = nil
+    local original_open = io.open
+    io.open = function(path, mode)
+        if path == "/usr/java/bin/java" then
+            return { close = function() end }
+        end
+        return original_open(path, mode)
+    end
+    assert(upgraded_plugin:progressRuntime() == "available",
+        "a readable Java 21 binary must be detected")
+    io.open = original_open
+    assert(upgraded_plugin.settings.progress_runtime_notice_shown == nil,
+        "detecting Java 21 must clear the unsupported-runtime notice")
 end
-assert(upgraded_plugin:progressRuntime() == "available",
-    "a readable Java 21 binary must be detected")
-io.open = original_open
-assert(upgraded_plugin.settings.progress_runtime_notice_shown == nil,
-    "detecting Java 21 must clear the unsupported-runtime notice")
 
 -- A position is not a completion signal. Ninety-nine percent remains an
 -- active local session and Currently Reading shelf action until KOReader
@@ -755,6 +817,31 @@ for _, item in ipairs(shelf_menu.goodreads_native.sub_item_table) do
 end
 assert(private_history_menu and #private_history_menu.sub_item_table == 6,
     "the private-history menu must expose stats, DNF, reread, goal, and export")
+do
+    local note_menu
+    for _, item in ipairs(shelf_menu.goodreads_native.sub_item_table) do
+        if item.text == "Progress update note" then
+            note_menu = item
+            break
+        end
+    end
+    assert(note_menu and #note_menu.sub_item_table == 4,
+        "the note menu must expose three presets and a custom entry")
+    shelf_plugin.progress_runtime = "available"
+    assert(not note_menu.enabled_func(), "the note only applies to cvm-only firmware")
+    shelf_plugin.progress_runtime = "cvm"
+    assert(note_menu.enabled_func(), "cvm-only firmware must allow choosing the note")
+    note_menu.sub_item_table[2].callback()
+    assert(shelf_plugin.settings.progress_note == "Reading on Kindle"
+            and note_menu.sub_item_table[2].checked_func()
+            and not note_menu.sub_item_table[4].checked_func(),
+        "choosing a preset must persist it")
+    shelf_plugin.settings.progress_note = "Chapter done"
+    assert(note_menu.sub_item_table[4].text_func() == "Custom: Chapter done"
+            and note_menu.sub_item_table[4].checked_func(),
+        "a custom note must be shown on the custom entry")
+    shelf_plugin.progress_runtime = "available"
+end
 
 io.popen = shelf_original_popen
 

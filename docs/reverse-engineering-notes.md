@@ -74,6 +74,42 @@ The tested request returned HTTP 202 and a valid native response. Native reader
 code also treats HTTP 200 as success, HTTP 422 as a parameter mismatch, and
 404/502/503/504 as transient or timeout failures.
 
+## Progress request without Java 21 (firmware 5.18.2)
+
+Firmware 5.18.2 ships only Amazon's `cvm` in `/usr/java/bin` (no `java`, no
+`jdk.attach`), so the agent above cannot load. The framework exports the same
+request through a library-action LIPC property:
+
+- Publisher: `com.lab126.readnow`
+- Hash property: `kppGoodReads`
+  (`com.amazon.kindle.restricted.library.action.GoodReadsHandler`, registered
+  by `KppLibraryActionHelper` in `EInkReadNowService.jar`)
+- Payload fields: `kppMycdActivityName = "PostReview"`, `asin`, `progress`
+  (integer percent), `note`
+- Returned hash: the request fields plus `result = "true"` only when
+  `GrokService` returns HTTP 202, otherwise `result = "false"`
+
+The handler sets the ASIN, locale language, `note_text` from `note`, and a
+`Percent` progress with denominator 1. It does not set `social_networks` or
+the `x-gr-application*` headers that the native reader-sharing path adds.
+Device tests on 5.18.2:
+
+| Note | Framework log | Result |
+|---|---|---|
+| `""` | `grokServiceCallFailed:errorCode=400` | `false` |
+| `" "` | `grokServiceCallFailed:errorCode=400` | `false` |
+| `"Reading"` | `Share To Good Reads response code is : 202` | accepted |
+
+A non-empty note is therefore required and is published with the update.
+`com.lab126.share / shareCurrentBook` is not an alternative: it requires the
+native reader's active book and opens the sharing UI.
+
+Other 5.18.2 Grok LIPC properties: `rateABook`, `getGoodreadsShelfForABook`,
+`setGoodreadsShelfForABook`, `contextualReviewActivity`, `isLinked`,
+`isGrokLinked`, `grokState`, `flushCache`, `searchRequest`. Do not probe these
+with `lipc-probe -v`: it prints current values, and the neighbouring
+`com.lab126.kppkaf` service exposes session tokens and cookies that way.
+
 ## Rating request
 
 - Publisher: `com.lab126.grokservice`

@@ -176,19 +176,20 @@ local and Amazon Notebook create/delete readback and a firmware allowlist.
   sustained single-reader/watcher health watch without a freeze or power-event
   regression.
 
-### Next — percentage on cvm-only firmware (5.18.x)
+### Device gate — percentage on cvm-only firmware (5.18.x)
 
-- Done: detect `cvm`, fail fast with `runtime_unsupported`, stop re-queuing,
-  and show a one-time notice (v0.11.4).
-- Device gate: read-only `lipc-probe` of `com.lab126.grokservice` and
-  `com.lab126.kppkaf`, plus decompiled framework jars, to find a native LIPC
-  progress or share property alongside `rateABook`.
-- If found: add a LIPC transport to `sync-progress`, modelled on
-  `sync-rating`, selected per firmware and reporting native acceptance only.
+- Done: detect `cvm`, fail fast, and stop re-queuing when no runtime exists
+  (v0.11.4).
+- Done: `com.lab126.readnow / kppGoodReads` LIPC transport with a validated,
+  user-chosen public note, confirmed `result = "true"` readback, and a bounded
+  call (v0.12.0). A manual 5.18.2 test returned HTTP 202 with a non-empty note
+  and HTTP 400 with an empty or blank one.
+- Device gate: full P1–P10 checkpoint UAT on 5.18.2 with the packaged helper.
 - Rejected unless new evidence appears: patching the framework's boot
-  classpath on the root filesystem (brick risk, redone after every update) and
+  classpath on the root filesystem (brick risk, redone after every update),
   direct HTTP calls with the Kindle's session (violates the native-service and
-  security contract).
+  security contract), and `com.lab126.share / shareCurrentBook` (needs the
+  native reader's active book and opens the sharing UI).
 
 Goodreads remains responsible for cloud shelves, progress, and ratings. The
 tested native bridge exposes no DNF, lifecycle-date, or reread write surface,
