@@ -55,7 +55,10 @@ account token is required or stored.
 ## Requirements
 
 - A jailbroken Kindle with KOReader.
-- Kindle firmware whose Amazon framework includes Java 21 and `jdk.attach`.
+- For percentage and annotation sync: Kindle firmware whose Amazon framework
+  includes Java 21 and `jdk.attach` (`/usr/java/bin/java`). Firmware that ships
+  only Amazon's older `cvm` runtime, such as 5.18.2, supports shelf and rating
+  sync only; see [Troubleshooting](#troubleshooting).
 - The Amazon account on the Kindle already linked to Goodreads.
 - `kindle.koplugin`; notes/highlights require its position-map-enabled build,
   and native-to-KOReader import requires v0.0.7 or newer.
@@ -64,7 +67,9 @@ account token is required or stored.
 
 Verified on:
 
-- Kindle firmware **5.19.5**
+- Kindle firmware **5.19.5**: shelf, percentage, rating, and annotations
+- Kindle firmware **5.18.2** (`cvm` only): shelf and rating; percentage and
+  annotations are reported as `runtime_unsupported`
 - KOReader **v2026.07.1**
 
 Other firmware versions may use different obfuscated class or method names.
@@ -529,8 +534,19 @@ error_envelope=false
 success=true
 ```
 
+The doctor's `java_runtime` is `available` (Java 21), `cvm`, or `missing`, and
+`attach_supported` says whether percentage and annotation agents can run. On
+firmware such as 5.18.2, `/usr/java/bin` contains only `cvm` and `keytool`.
+`cvm` is Amazon's older embedded JVM without `jdk.attach`, so the plugin skips
+percentage sync, shows a one-time notice, and keeps shelf and rating sync
+working. The helpers read `GOODREADS_JAVA_BIN` and `GOODREADS_CVM_BIN` for
+testing alternative runtime paths.
+
 Common failure points:
 
+- `failed_stage=runtime_unsupported`: only `cvm` is present; percentage and
+  annotation sync need Java 21 with `jdk.attach`.
+- `failed_stage=runtime_missing`: no Java runtime was found at all.
 - `failed_stage=parse_arguments`: invalid ASIN, percentage, or application.
 - `failed_stage=resolve_native_services`: Amazon's Grok or reader-sharing
   service is unavailable, often because the native framework was stopped.

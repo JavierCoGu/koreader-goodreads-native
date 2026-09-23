@@ -3,7 +3,7 @@
 # Read-only export of the exact active native book's annotation coordinates.
 set -u
 
-JAVA_BIN="/usr/java/bin/java"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
 AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-export-agent-v3.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
@@ -24,7 +24,10 @@ case "$payload" in
     /tmp/goodreads-native-export-[0-9]*.properties) ;;
     *) exit 2 ;;
 esac
-[ -f "$payload" ] && [ -x "$JAVA_BIN" ] && [ -r "$AGENT_JAR" ] \
+# shellcheck source=goodreads-java-runtime
+. "$SCRIPT_DIR/goodreads-java-runtime"
+goodreads_detect_java_runtime
+[ -f "$payload" ] && [ "$attach_supported" = true ] && [ -r "$AGENT_JAR" ] \
     && [ -r "$LAUNCHER_CLASSES/AttachLauncher.class" ] || exit 3
 
 mode="$(sed -n 's/^mode=//p' "$payload" | sed -n '1p')"

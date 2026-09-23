@@ -6,7 +6,7 @@
 
 set -u
 
-JAVA_BIN="/usr/java/bin/java"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
 AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v31.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
@@ -74,10 +74,14 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ ! -f "$payload" ] || [ ! -x "$JAVA_BIN" ] || [ ! -r "$AGENT_JAR" ] \
+if [ ! -f "$payload" ] || [ ! -r "$AGENT_JAR" ] \
     || [ ! -r "$LAUNCHER_CLASSES/AttachLauncher.class" ]; then
     exit 3
 fi
+
+# shellcheck source=goodreads-java-runtime
+. "$SCRIPT_DIR/goodreads-java-runtime"
+goodreads_detect_java_runtime
 
 asin="$(sed -n 's/^asin=//p' "$payload" | sed -n '1p')"
 request_id="$(sed -n 's/^request_id=//p' "$payload" | sed -n '1p')"
@@ -237,6 +241,22 @@ if [ "$outbox_matches" != "true" ]; then
     publish_result || true
     write_receipt failed "$request_result" outbox_superseded || true
     exit 76
+fi
+
+if [ "$attach_supported" != true ]; then
+    # cvm-only firmware cannot attach the agent. Publish an immediate retryable
+    # result instead of making KOReader poll for 120 seconds; the durable
+    # outbox is kept for a later firmware that provides jdk.attach.
+    runtime_stage="$(goodreads_runtime_failed_stage)"
+    printf '%s\n' \
+        "asin=$asin" "request_id=$request_id" "requested=$desired_count" \
+        "outbox_sequence=$outbox_sequence" 'outbox_acknowledged=false' \
+        'local_success=false' 'local_verified=false' 'native_notified=false' \
+        'native_cloud_queued=false' 'sync_enqueued=false' \
+        'success=false' "failed_stage=$runtime_stage" >"$request_result"
+    publish_result || true
+    write_receipt failed "$request_result" "$runtime_stage" || true
+    exit 3
 fi
 
 if ! mkdir -p "$STATE_DIR"; then

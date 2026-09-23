@@ -56,11 +56,41 @@ grep -Fqx 'annotation_outbox_books=1' "$output"
 grep -Fqx 'native_import_books=1' "$output"
 grep -Fqx 'pending_annotation_books=1' "$output"
 grep -Fqx 'reader_launch_attempted=false' "$output"
+grep -Fqx 'schema=2' "$output"
+grep -Fqx 'java_runtime=available' "$output"
+grep -Fqx 'attach_supported=true' "$output"
 grep -Fqx 'overall=healthy' "$output"
 if grep -Eq 'B0[0-9]+|private|secret|token' "$output"; then
     printf 'error: doctor leaked private fixture data\n' >&2
     exit 1
 fi
+
+# Firmware such as 5.18.2 ships only Amazon's cvm. It is a real runtime, but it
+# cannot attach agents, so it must be reported distinctly from a missing one.
+set +e
+GOODREADS_PLUGIN_DIR="$plugin" GOODREADS_PRIVATE_STATE_DIR="$state" \
+    GOODREADS_DOCTOR_PROC_ROOT="$proc" GOODREADS_DOCTOR_JAVA_BIN=/nonexistent/java \
+    GOODREADS_DOCTOR_CVM_BIN=/bin/sh \
+    GOODREADS_DOCTOR_ARCH=armv7l "$doctor" >"$output"
+status=$?
+set -e
+[ "$status" -eq 1 ]
+grep -Fqx 'java_runtime=cvm' "$output"
+grep -Fqx 'attach_supported=false' "$output"
+grep -Fqx 'warnings=1' "$output"
+grep -Fqx 'overall=warning' "$output"
+
+set +e
+GOODREADS_PLUGIN_DIR="$plugin" GOODREADS_PRIVATE_STATE_DIR="$state" \
+    GOODREADS_DOCTOR_PROC_ROOT="$proc" GOODREADS_DOCTOR_JAVA_BIN=/nonexistent/java \
+    GOODREADS_DOCTOR_CVM_BIN=/nonexistent/cvm \
+    GOODREADS_DOCTOR_ARCH=armv7l "$doctor" >"$output"
+status=$?
+set -e
+[ "$status" -eq 1 ]
+grep -Fqx 'java_runtime=missing' "$output"
+grep -Fqx 'attach_supported=false' "$output"
+grep -Fqx 'overall=warning' "$output"
 
 # A second independent reader root is a hard error with a machine-readable
 # nonzero status, but it still must not print process arguments or identifiers.

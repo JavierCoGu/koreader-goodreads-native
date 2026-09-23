@@ -176,6 +176,20 @@ local and Amazon Notebook create/delete readback and a firmware allowlist.
   sustained single-reader/watcher health watch without a freeze or power-event
   regression.
 
+### Next — percentage on cvm-only firmware (5.18.x)
+
+- Done: detect `cvm`, fail fast with `runtime_unsupported`, stop re-queuing,
+  and show a one-time notice (v0.11.4).
+- Device gate: read-only `lipc-probe` of `com.lab126.grokservice` and
+  `com.lab126.kppkaf`, plus decompiled framework jars, to find a native LIPC
+  progress or share property alongside `rateABook`.
+- If found: add a LIPC transport to `sync-progress`, modelled on
+  `sync-rating`, selected per firmware and reporting native acceptance only.
+- Rejected unless new evidence appears: patching the framework's boot
+  classpath on the root filesystem (brick risk, redone after every update) and
+  direct HTTP calls with the Kindle's session (violates the native-service and
+  security contract).
+
 Goodreads remains responsible for cloud shelves, progress, and ratings. The
 tested native bridge exposes no DNF, lifecycle-date, or reread write surface,
 so those facts remain local and are never reported as cloud-synced.

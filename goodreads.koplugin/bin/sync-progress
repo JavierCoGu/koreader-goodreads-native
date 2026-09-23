@@ -6,13 +6,13 @@
 
 set -u
 
-JAVA_BIN="/usr/java/bin/java"
-PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
 AGENT_JAR="$PLUGIN_DIR/bin/goodreads-progress-agent-v2.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
-STATE_DIR="/mnt/us/koreader/settings/goodreads_native_progress"
+STATE_DIR="${GOODREADS_PROGRESS_STATE_DIR:-/mnt/us/koreader/settings/goodreads_native_progress}"
 LOCK_DIR="/tmp/goodreads-progress-sync.lock"
-RESULT_FILE="/tmp/goodreads-progress-result.log"
+RESULT_FILE="${GOODREADS_PROGRESS_RESULT_FILE:-/tmp/goodreads-progress-result.log}"
 ATTACH_LOG="/tmp/goodreads-progress-attach.log"
 
 if [ "$#" -ne 2 ]; then
@@ -34,7 +34,30 @@ if [ "$percent" -lt 1 ] || [ "$percent" -gt 100 ]; then
     exit 2
 fi
 
-if [ ! -x "$JAVA_BIN" ] || [ ! -r "$AGENT_JAR" ] \
+# shellcheck source=goodreads-java-runtime
+. "$SCRIPT_DIR/goodreads-java-runtime"
+goodreads_detect_java_runtime
+
+# Without jdk.attach no agent can run, so no result file would ever appear and
+# KOReader would wait out its full poll window. Publish a definite failure
+# instead. The file matches the agent's own format and lives only in /tmp.
+if [ "$attach_supported" != true ]; then
+    result_temp="$RESULT_FILE.$$"
+    if {
+        printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'asin=%s\n' "$asin"
+        printf 'percent=%s\n' "$percent"
+        printf 'success=false\n'
+        printf 'failed_stage=%s\n' "$(goodreads_runtime_failed_stage)"
+    } >"$result_temp"; then
+        mv -f "$result_temp" "$RESULT_FILE" || rm -f "$result_temp"
+    else
+        rm -f "$result_temp"
+    fi
+    exit 3
+fi
+
+if [ ! -r "$AGENT_JAR" ] \
     || [ ! -r "$LAUNCHER_CLASSES/AttachLauncher.class" ]; then
     exit 3
 fi

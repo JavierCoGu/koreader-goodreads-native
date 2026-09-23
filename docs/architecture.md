@@ -82,6 +82,17 @@ The percentage path cannot use that shelf property. `sync-progress` locates the
 running Kindle framework JVM, serializes attachment with an atomic lock, and
 loads a small Java agent through the JDK Attach API.
 
+Attachment needs Java 21 with `jdk.attach`. `bin/goodreads-java-runtime`, which
+every helper and the doctor share, classifies the runtime by file presence
+alone: `available` (`/usr/java/bin/java`), `cvm` (Amazon's older runtime, as on
+firmware 5.18.2), or `missing`. Without attach support the helper immediately
+publishes `failed_stage=runtime_unsupported` or `runtime_missing` rather than
+exiting silently into KOReader's 30-second poll. KOReader makes the same check
+once per session and does not queue the helper at all, so periodic and close
+checkpoints do not retry an impossible transport. Annotation helpers publish
+the same stage as a retryable result, which preserves the durable outbox for a
+later firmware.
+
 Inside the already-authenticated framework, the agent constructs a native
 `PostShareProgressRequest`, sets the same headers as Amazon's reader-sharing
 code, and invokes `GrokService.b(...)`. It logs only stage, HTTP status,

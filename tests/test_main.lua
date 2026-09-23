@@ -148,6 +148,9 @@ local function newPlugin(settings)
         last_progress_sync = nil,
         last_checkpoint = nil,
         last_native_progress_result = nil,
+        -- CI hosts have no Kindle JVM; model firmware 5.19.x by default.
+        progress_runtime = "available",
+        progress_runtime_logged = false,
         last_annotation_event = nil,
         progress_timer_scheduled = false,
         progress_timer_generation = 0,
@@ -271,6 +274,53 @@ for _, command in ipairs(commands) do
     assert(not command:match("lipc%-hash%-prop"),
         "1,000 periodic checkpoints must publish zero shelf actions")
 end
+
+-- Firmware 5.18.2 ships only cvm, which cannot attach the percentage agent.
+-- Checkpoints must never queue the helper there, explain the limitation
+-- exactly once, and still publish the native shelf action.
+local cvm_plugin = newPlugin(settings({ enabled = true }))
+cvm_plugin.progress_runtime = "cvm"
+commands = {}
+shown_messages = {}
+cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.46, "reading", "reader_ready", "test")
+cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.47, "reading", "suspend", "test")
+for _ = 1, 100 do
+    cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.48, "reading", "periodic", "stress")
+end
+cvm_plugin:syncCapturedCheckpoint("B0FLB24198", 0.49, "reading", "close", "test")
+local cvm_shelf_commands = 0
+for _, command in ipairs(commands) do
+    assert(not command:match("sync%-progress"),
+        "cvm firmware must never queue the percentage helper")
+    if command:match("lipc%-hash%-prop") then
+        cvm_shelf_commands = cvm_shelf_commands + 1
+    end
+end
+assert(cvm_shelf_commands >= 1, "cvm firmware must still publish the native shelf action")
+assert(#shown_messages == 1 and shown_messages[1].text:match("Java 21"),
+    "the unsupported-runtime notice must be shown exactly once")
+assert(cvm_plugin.settings.progress_runtime_notice_shown == true,
+    "the unsupported-runtime notice must persist across sessions")
+local cvm_ok, cvm_detail = cvm_plugin:syncProgress("B0FLB24198", 0.5, "manual")
+assert(not cvm_ok and cvm_detail == "percentage sync unavailable on this firmware",
+    "manual percentage sync must report the unsupported runtime")
+assert(#shown_messages == 1, "a persisted notice must not be shown again")
+
+-- A later session with Java 21 re-arms the notice for any future downgrade.
+local upgraded_plugin = newPlugin(settings({ progress_runtime_notice_shown = true }))
+upgraded_plugin.progress_runtime = nil
+local original_open = io.open
+io.open = function(path, mode)
+    if path == "/usr/java/bin/java" then
+        return { close = function() end }
+    end
+    return original_open(path, mode)
+end
+assert(upgraded_plugin:progressRuntime() == "available",
+    "a readable Java 21 binary must be detected")
+io.open = original_open
+assert(upgraded_plugin.settings.progress_runtime_notice_shown == nil,
+    "detecting Java 21 must clear the unsupported-runtime notice")
 
 -- A position is not a completion signal. Ninety-nine percent remains an
 -- active local session and Currently Reading shelf action until KOReader

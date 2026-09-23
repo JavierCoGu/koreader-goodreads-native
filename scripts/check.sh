@@ -20,6 +20,7 @@ sh -n "$plugin_dir/bin/manage-sync-receipts"
 sh -n "$plugin_dir/bin/acknowledge-annotation-outbox"
 sh -n "$plugin_dir/bin/persist-annotation-identities"
 sh -n "$plugin_dir/bin/goodreads-doctor"
+sh -n "$plugin_dir/bin/goodreads-java-runtime"
 test -x "$plugin_dir/bin/manage-sync-receipts"
 test -x "$plugin_dir/bin/acknowledge-annotation-outbox"
 test -x "$plugin_dir/bin/persist-annotation-identities"
@@ -31,6 +32,7 @@ test -x "$plugin_dir/bin/goodreads-doctor"
 cmp -s "$project_root/VERSION" "$plugin_dir/VERSION" \
     || { printf 'error: packaged plugin version does not match release version\n' >&2; exit 1; }
 "$project_root/tests/test_doctor.sh"
+"$project_root/tests/test_sync_progress.sh"
 grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation sync does not persist its local-save receipt\n' >&2; exit 1; }
 grep -Fq 'write_receipt waiting_native' "$plugin_dir/bin/sync-annotations" \
@@ -135,6 +137,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     # ShellCheck's informational findings include false positives for the
     # trap-only cleanup function and literal JVM inner-class filenames.
     shellcheck --severity=warning "$plugin_dir/bin/sync-progress" \
+        "$plugin_dir/bin/goodreads-java-runtime" \
         "$plugin_dir/bin/sync-rating" \
         "$plugin_dir/bin/sync-annotations" \
         "$plugin_dir/bin/exit-koreader-after-native-handoff" \

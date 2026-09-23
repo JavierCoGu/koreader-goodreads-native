@@ -64,6 +64,11 @@ local RATING_RESULT_PREFIX = "/tmp/goodreads-rating-result"
 local PROGRESS_RESULT_FILE = "/tmp/goodreads-progress-result.log"
 local ANNOTATION_RESULT_FILE = "/tmp/goodreads-annotation-result.log"
 local PROGRESS_STATE_DIR = "/mnt/us/koreader/settings/goodreads_native_progress"
+-- Percentage and annotation agents need Java 21 with jdk.attach. Firmware such
+-- as 5.18.2 ships only Amazon's cvm, which cannot attach to the framework.
+local JAVA_BIN = os.getenv("GOODREADS_JAVA_BIN") or "/usr/java/bin/java"
+local CVM_BIN = os.getenv("GOODREADS_CVM_BIN") or "/usr/java/bin/cvm"
+local PROGRESS_RUNTIME_UNAVAILABLE = "percentage sync unavailable on this firmware"
 local DEBUG_LOG_FILE = "/mnt/us/koreader/settings/goodreads_native_debug.log"
 local DEBUG_LOG_MAX_BYTES = 128 * 1024
 local DEFAULT_PROGRESS_INTERVAL_SECONDS = 300
@@ -3416,6 +3421,8 @@ function Goodreads:init()
     self.last_progress_sync = nil
     self.last_checkpoint = nil
     self.last_native_progress_result = nil
+    self.progress_runtime = nil
+    self.progress_runtime_logged = false
     self.last_annotation_event = nil
     self.progress_timer_scheduled = false
     self.progress_timer_generation = 0
@@ -4586,6 +4593,53 @@ function Goodreads:syncAsin(asin, action, percent, wait_for_result, trigger)
     return true, "queued"
 end
 
+--- Classify the attach runtime once per session: "available", "cvm", or
+--- "missing". Mirrors bin/goodreads-java-runtime without starting a JVM.
+function Goodreads:progressRuntime()
+    if not self.progress_runtime then
+        if isReadable(JAVA_BIN) then
+            self.progress_runtime = "available"
+        elseif isReadable(CVM_BIN) then
+            self.progress_runtime = "cvm"
+        else
+            self.progress_runtime = "missing"
+        end
+        -- A later firmware may add Java 21; explain again if it is lost.
+        if self.progress_runtime == "available"
+            and self.settings.progress_runtime_notice_shown
+        then
+            self.settings.progress_runtime_notice_shown = nil
+            self:saveSettings()
+        end
+    end
+    return self.progress_runtime
+end
+
+function Goodreads:noteProgressRuntimeUnavailable(asin, percent, trigger)
+    local runtime = self:progressRuntime()
+    if not self.progress_runtime_logged then
+        self.progress_runtime_logged = true
+        self:debugLog("progress_skipped", {
+            trigger = trigger or "unknown",
+            asin = asin,
+            percent = percent,
+            status = runtime == "cvm" and "runtime_unsupported" or "runtime_missing",
+        })
+    end
+    if self.settings.progress_runtime_notice_shown then
+        return
+    end
+    self.settings.progress_runtime_notice_shown = true
+    self:saveSettings()
+    -- Manual sync reports the same fact in its own summary message.
+    if trigger ~= "manual" then
+        UIManager:show(InfoMessage:new({
+            text = _("Goodreads percentage sync needs Java 21, which this Kindle firmware does not include. Shelf and rating sync still work."),
+            timeout = 8,
+        }))
+    end
+end
+
 function Goodreads:syncProgress(asin, fraction, trigger)
     if not isAsin(asin) then
         return false, "not an Amazon ASIN"
@@ -4600,6 +4654,13 @@ function Goodreads:syncProgress(asin, fraction, trigger)
             status = "below_one_percent",
         })
         return false, "no percentage progress yet"
+    end
+
+    -- Without jdk.attach the helper can never deliver. Skip it entirely so
+    -- periodic, suspend, and close checkpoints do not keep re-queuing it.
+    if self:progressRuntime() ~= "available" then
+        self:noteProgressRuntimeUnavailable(asin, percent, trigger)
+        return false, PROGRESS_RUNTIME_UNAVAILABLE
     end
 
     local saved_percent = tonumber(readFirstLine(PROGRESS_STATE_DIR .. "/" .. asin))
@@ -4791,10 +4852,12 @@ function Goodreads:syncCurrentBook()
     end
 
     local ok, detail = self:syncAsin(asin, action, percent, true, "manual")
-    local progress_ok = self:syncProgress(asin, percent, "manual")
+    local progress_ok, progress_detail = self:syncProgress(asin, percent, "manual")
     local message
     if ok and progress_ok then
         message = _("Goodreads shelf confirmed; percentage queued.")
+    elseif ok and progress_detail == PROGRESS_RUNTIME_UNAVAILABLE then
+        message = _("Goodreads shelf confirmed; percentage sync is unavailable on this Kindle firmware (needs Java 21).")
     else
         message = string.format(_("Goodreads sync failed: %s"), detail or _("unknown error"))
     end
@@ -4842,6 +4905,14 @@ function Goodreads:showDiagnostics()
         string.format(
             _("Redacted debug log: %s"),
             self.settings.debug_enabled and _("enabled") or _("disabled")
+        ),
+        string.format(
+            _("Percentage runtime: %s"),
+            ({
+                available = _("Java 21 (attach supported)"),
+                cvm = _("cvm only (percentage unsupported)"),
+                missing = _("missing"),
+            })[self:progressRuntime()]
         ),
         "",
     }

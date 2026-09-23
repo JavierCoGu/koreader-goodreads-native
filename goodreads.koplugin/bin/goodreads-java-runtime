@@ -1,0 +1,34 @@
+# shellcheck shell=sh
+# Shared by helpers through `.`; not executed directly.
+#
+# Classify the Kindle Java runtime used by jdk.attach helpers. Firmware 5.19.x
+# ships Java 21 as /usr/java/bin/java. Older firmware such as 5.18.2 ships only
+# Amazon's cvm, which cannot load agents into the running framework. Only file
+# presence is checked, so this never starts a JVM and is cheap on every sync.
+#
+# Sets JAVA_BIN, CVM_BIN, java_runtime (available|cvm|missing), and
+# attach_supported (true|false).
+
+goodreads_detect_java_runtime() {
+    JAVA_BIN="${GOODREADS_JAVA_BIN:-/usr/java/bin/java}"
+    CVM_BIN="${GOODREADS_CVM_BIN:-/usr/java/bin/cvm}"
+    if [ -x "$JAVA_BIN" ]; then
+        java_runtime=available
+        attach_supported=true
+    elif [ -x "$CVM_BIN" ]; then
+        java_runtime=cvm
+        attach_supported=false
+    else
+        java_runtime=missing
+        attach_supported=false
+    fi
+}
+
+# Map an unusable runtime to the stable failure stage used in result files.
+goodreads_runtime_failed_stage() {
+    if [ "$java_runtime" = cvm ]; then
+        printf '%s' runtime_unsupported
+    else
+        printf '%s' runtime_missing
+    fi
+}

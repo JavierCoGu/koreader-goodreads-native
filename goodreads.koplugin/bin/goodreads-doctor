@@ -7,7 +7,9 @@ PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}
 KOREADER_DIR="${GOODREADS_KOREADER_DIR:-/mnt/us/koreader}"
 PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
 PROC_ROOT="${GOODREADS_DOCTOR_PROC_ROOT:-/proc}"
-JAVA_BIN="${GOODREADS_DOCTOR_JAVA_BIN:-/usr/java/bin/java}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+GOODREADS_JAVA_BIN="${GOODREADS_DOCTOR_JAVA_BIN:-${GOODREADS_JAVA_BIN:-}}"
+GOODREADS_CVM_BIN="${GOODREADS_DOCTOR_CVM_BIN:-${GOODREADS_CVM_BIN:-}}"
 ARCH="${GOODREADS_DOCTOR_ARCH:-$(uname -m 2>/dev/null || printf unknown)}"
 
 warnings=0
@@ -85,12 +87,12 @@ else
     single_instance=ok
 fi
 
-if [ -x "$JAVA_BIN" ]; then
-    java_runtime=available
-else
-    java_runtime=missing
-    warnings=$((warnings + 1))
-fi
+# shellcheck source=goodreads-java-runtime
+. "$SCRIPT_DIR/goodreads-java-runtime"
+goodreads_detect_java_runtime
+# cvm-only firmware (for example 5.18.2) keeps shelf and rating sync, but
+# percentage and annotation agents need Java 21 with jdk.attach.
+[ "$attach_supported" = true ] || warnings=$((warnings + 1))
 
 if [ "$framework_processes" -gt 0 ]; then
     native_framework=running
@@ -124,10 +126,11 @@ else
 fi
 
 printf '%s\n' \
-    'schema=1' \
+    'schema=2' \
     "plugin_version=$version" \
     "architecture=$ARCH" \
     "java_runtime=$java_runtime" \
+    "attach_supported=$attach_supported" \
     "native_framework=$native_framework" \
     "reader_processes=$reader_processes" \
     "reader_roots=$reader_roots" \

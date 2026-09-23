@@ -3,6 +3,37 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.4] - 2026-09-23
+
+### Fixed
+
+- Firmware that ships only Amazon's `cvm` runtime (for example 5.18.2) no
+  longer reports every percentage attempt as a 30-second timeout. Percentage
+  and annotation agents need Java 21 with `jdk.attach`, so the helpers now
+  publish an immediate `failed_stage=runtime_unsupported` (or
+  `runtime_missing`) result instead of exiting silently.
+- KOReader detects the runtime once per session and stops queuing the
+  percentage helper on periodic, suspend, resume, and close checkpoints when it
+  cannot deliver. A one-time notice explains that shelf and rating sync still
+  work; it is re-armed if a later firmware provides Java 21.
+- Manual **Sync current book now** reports a confirmed shelf with unavailable
+  percentage sync instead of a generic failure.
+- `goodreads-doctor` distinguishes `java_runtime=cvm` from `missing` and adds
+  `attach_supported`. The report schema is now `2`.
+
+### Changed
+
+- All helpers share one runtime check in `bin/goodreads-java-runtime`, and the
+  Java and cvm paths accept `GOODREADS_JAVA_BIN` / `GOODREADS_CVM_BIN`
+  overrides for testing.
+- **Show sync diagnostics** includes the detected percentage runtime.
+
+### Tests
+
+- Added doctor cases for cvm-only and missing runtimes, a progress-helper
+  fail-fast test, and checkpoint coverage proving cvm firmware never queues the
+  helper, shows the notice once, and still publishes shelf actions.
+
 ## [0.11.3] - 2026-08-22
 
 ### Fixed
